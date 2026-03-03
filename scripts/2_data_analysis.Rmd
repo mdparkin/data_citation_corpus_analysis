@@ -1,0 +1,153 @@
+---
+title: "DataCite Data Citation Corpus Analysis"
+author: "Michael Parkin, <mdparkin@gmail.com>"
+date: '`r format(Sys.time(), "%Y-%m-%d")`'
+output:
+  html_document: 
+    theme: readable
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, message=FALSE, warning=FALSE, include=FALSE}
+library(tidyr)
+library(stringr)
+library(dplyr)
+library(plotly)
+library(httr2)
+library(purrr)
+```
+
+# Introduction
+This report uses the latest Data Citation Corpus files from Zenodo (<https://zenodo.org/records/16901115>) and runs various analyses as detailed below.
+
+# Analyses
+```{r load_data, message=FALSE, warning=FALSE, include=FALSE}
+data_out_path <- "data_out"
+rds_file <- list.files(path = data_out_path,
+                       pattern = "\\.rds$",
+                       full.names = TRUE)
+
+data_processed <- readRDS(rds_file)
+```
+
+## Metadata coverage by property
+The chart below indicates the percentage metadata coverage per metadata property across the Corpus. A best attempt is made to handle cases where 'None' or multiple instance of 'None' with punctuation are correctly treated as missing data. This is significant in the ROR fields.
+
+```{r property_coverage, echo=FALSE, message=FALSE, warning=FALSE}
+none_regex <- "\\s*none\\s*(.|,|;|:)?\\s*"  # lots of entries are "None" so need to remove
+
+coverage <- data_processed %>% 
+  mutate(across(where(is.character),
+                ~ str_trim(str_replace_all(., regex(none_regex, 
+                                           ignore_case = TRUE), "")))) %>% 
+  summarise(across(everything(),
+                   ~ if (is.character(.)) {
+                     mean(is.na(.) | . == "")
+                   } else {
+                     mean(is.na(.))  # handle non-character fields (dates)
+                   }
+                   )) %>% 
+  pivot_longer(everything(),
+               names_to = "property",
+               values_to = "prop_missing") %>% 
+  mutate(prop_available = 1 - prop_missing)
+
+coverage
+```
+
+```{r property_coverage_plot, echo=FALSE, message=FALSE, warning=FALSE}
+plot_ly(
+  data = coverage,
+  x = ~ prop_available,
+  y = ~ reorder(property, prop_available),
+  type = "bar",
+  orientation = "h"
+) %>%
+  layout(
+    title = "Percentage coverage of metadata properties",
+    xaxis = list(title = "Percentage available",
+                 tickformat = ".1%",
+                 range = c(0, 1)),
+    yaxis = list(title = "Property")
+  ) %>% partial_bundle()
+```
+
+## Subjects
+Many data citations are associated with one or more subjects. The chart below shows the percentage of data citations associated with a particular subject. For plotting, only the top 10 (of 32 total) most frequently occurring subjects are shown.
+
+```{r subjects, echo=FALSE, message=FALSE, warning=FALSE}
+n_records <- nrow(data_processed)
+
+subjects <- data_processed %>% 
+  select(subjects) %>% 
+  filter(!is.na(subjects)) %>% 
+  separate_longer_delim(subjects, delim = '; ') %>% 
+  group_by(subjects) %>% 
+  summarise(n = n()) %>% 
+  mutate(prop_available = n / n_records) %>% 
+  arrange(-n)
+
+subjects
+```
+
+```{r subjects_plot, echo=FALSE, message=FALSE, warning=FALSE}
+plot_ly(
+  data = subjects %>% slice_max(order_by = n,
+                                n = 10),
+  x = ~ prop_available,
+  y = ~ reorder(subjects, prop_available),
+  type = "bar",
+  orientation = "h"
+) %>%
+  layout(
+    title = "Percentage association of citations with top 10 subjects",
+    xaxis = list(title = "Percentage available",
+                 tickformat = ".1%",
+                 range = c(0, 1)),
+    yaxis = list(title = "Subject")
+  ) %>% partial_bundle()
+```
+
+## Affiliations
+A similar analysis can be done with affiliations, although the coverage for affiliations is far lower than subjects. Since affiliation strings are very messy, here ROR IDs available in the Corpus are used as they are unique.
+
+Only the top 10 most frequently occurring ROR IDs are provided. A lookup using the ROR API is used to return the primary affiliation name in ROR. The counts represent the number of citations known to be associated with a particular affiliation.
+
+```{r ror_lookup_function, message=FALSE, warning=FALSE, include=FALSE}
+ror_name_from_id <- function(rorid){
+  req <- request(str_c("https://api.ror.org/v2/organizations/", rorid))
+  resp <- req_perform(req)
+  names <- resp_body_json(resp)$names
+  display_name <- "Unavailable"
+  for (name in names){
+    if ("ror_display" %in% name$types) {
+      display_name <- name$value
+    }
+  }
+  return(display_name)
+}
+```
+
+```{r affiliations, echo=FALSE, message=FALSE, warning=FALSE}
+affiliations <- data_processed %>% 
+  select(affiliationsROR) %>% 
+  filter(!is.na(affiliationsROR)) %>% 
+  transmute(ror = str_extract_all(affiliationsROR, 
+                                  "0[a-z|0-9]{6}[0-9]{2}")) %>% 
+  unnest_longer(ror) %>% 
+  group_by(ror) %>% 
+  summarise(n = n()) %>% 
+  slice_max(order_by = n,
+            n = 10) %>% 
+  mutate(affiliation = map_chr(ror, ror_name_from_id))
+
+affiliations
+```

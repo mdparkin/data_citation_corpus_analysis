@@ -1,0 +1,1 @@
+This repository provides R code for some initial analysis of the [Data Citation Corpus](https://support.datacite.org/docs/data-citation-corpus), a project by DataCite and Make Data Count funded by the Wellcome Trust.
